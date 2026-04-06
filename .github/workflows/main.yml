@@ -1,0 +1,174 @@
+name: UnrealStreams — Debug Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'app.config.js'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        required: true
+        default: 'main'
+
+jobs:
+  build-android-debug:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 🛎️ Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+          fetch-depth: 0
+
+      - name: 📋 Get commit info
+        run: |
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "COMMIT_MSG=$(git log -1 --pretty=%s | sed 's/[^a-zA-Z0-9 .,;:_()-]//g')" >> $GITHUB_ENV
+          echo "COMMIT_AUTHOR=$(git log -1 --pretty=%an)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u '+%Y-%m-%d')" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(date -u '+%H-%M-%S')" >> $GITHUB_ENV
+
+      - name: 🟢 Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
+
+      - name: 📦 Install JS dependencies
+        run: npm ci
+
+      - name: ☕ Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: 🔧 Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: 🏗️ Run Expo Prebuild
+        run: npx expo prebuild --platform android --clean
+
+      - name: 🐛 Build Debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug --stacktrace
+
+      - name: 📦 Collect & rename APKs
+        id: apk_files
+        run: |
+          VERSION=$(grep -m 1 'versionName ' android/app/build.gradle | sed 's/.*versionName "\(.*\)".*/\1/')
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+
+          mkdir -p apks
+
+          echo "=== Listing built APKs ==="
+          find android/app/build/outputs/apk/debug -name "*.apk" 2>/dev/null || echo "No APKs found in debug path"
+          find android/app/build/outputs/apk/ -name "*.apk" 2>/dev/null
+
+          UNIVERSAL=$(find android/app/build/outputs/apk/debug -name "*universal*.apk" | head -1)
+          ARMV7=$(find android/app/build/outputs/apk/debug -name "*armeabi-v7a*.apk" | head -1)
+          ARMV8=$(find android/app/build/outputs/apk/debug -name "*arm64-v8a*.apk" | head -1)
+          FALLBACK=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -1)
+
+          APK_PATHS=""
+
+          if [ -f "$UNIVERSAL" ]; then
+            NAME="UnrealStreams-debug-v${VERSION}-universal-${BUILD_DATE}.apk"
+            cp "$UNIVERSAL" "apks/$NAME"
+            echo "UNIVERSAL_APK_NAME=$NAME" >> $GITHUB_ENV
+            APK_PATHS="${APK_PATHS}apks/$NAME,"
+          fi
+
+          if [ -f "$ARMV7" ]; then
+            NAME="UnrealStreams-debug-v${VERSION}-armv7-${BUILD_DATE}.apk"
+            cp "$ARMV7" "apks/$NAME"
+            echo "ARMV7_APK_NAME=$NAME" >> $GITHUB_ENV
+            APK_PATHS="${APK_PATHS}apks/$NAME,"
+          fi
+
+          if [ -f "$ARMV8" ]; then
+            NAME="UnrealStreams-debug-v${VERSION}-armv8-${BUILD_DATE}.apk"
+            cp "$ARMV8" "apks/$NAME"
+            echo "ARMV8_APK_NAME=$NAME" >> $GITHUB_ENV
+            APK_PATHS="${APK_PATHS}apks/$NAME,"
+          fi
+
+          # Fallback: grab whatever debug APK exists
+          if [ -z "$APK_PATHS" ] && [ -f "$FALLBACK" ]; then
+            NAME="UnrealStreams-debug-v${VERSION}-${BUILD_DATE}.apk"
+            cp "$FALLBACK" "apks/$NAME"
+            APK_PATHS="apks/$NAME"
+          fi
+
+          APK_PATHS=$(echo "$APK_PATHS" | sed 's/,$//')
+          echo "apk_paths=$APK_PATHS" >> $GITHUB_OUTPUT
+
+          echo "=== Final APK list ==="
+          ls -lh apks/
+
+          RELEASE_TAG="debug-${BUILD_DATE}-${{ github.run_number }}"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
+
+      - name: 🗑️ Delete previous debug releases
+        run: |
+          git fetch --tags
+          DEBUG_TAGS=$(git tag -l "debug-*" || echo "")
+          if [ -n "$DEBUG_TAGS" ]; then
+            for TAG in $DEBUG_TAGS; do
+              git tag -d "$TAG" 2>/dev/null || true
+              git push --delete origin "$TAG" 2>/dev/null || true
+              RELEASE_ID=$(curl -s \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+                | grep -o '"id": [0-9]*' | head -1 | sed 's/"id": //')
+              if [ -n "$RELEASE_ID" ] && [ "$RELEASE_ID" != "null" ]; then
+                curl -s -X DELETE \
+                  -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                  "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
+              fi
+            done
+          fi
+
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "🐛 Debug Build v${{ env.APP_VERSION }} — ${{ env.BUILD_DATE }} #${{ github.run_number }}"
+          body: |
+            > 🐛 **DEBUG BUILD** — For testing only. Not for regular use.
+
+            | Field | Value |
+            |-------|-------|
+            | **App** | UnrealStreams |
+            | **Version** | v${{ env.APP_VERSION }} |
+            | **Build** | #${{ github.run_number }} |
+            | **Date** | ${{ env.BUILD_DATE }} |
+            | **Branch** | `${{ github.event.inputs.branch || github.ref_name }}` |
+            | **Commit** | [`${{ env.COMMIT_HASH }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) by ${{ env.COMMIT_AUTHOR }} |
+            | **Message** | ${{ env.COMMIT_MSG }} |
+
+            ### 📲 Which APK to install?
+            - **universal** — safe choice for any device
+            - **armv8** — best for phones made after ~2018 (smaller size)
+            - **armv7** — only for very old devices
+          files: ${{ steps.apk_files.outputs.apk_paths }}
+          draft: false
+          prerelease: true
+
+      - name: 📤 Upload APKs as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnrealStreams-debug-v${{ env.APP_VERSION }}-${{ env.BUILD_DATE }}
+          path: apks/*.apk
+          if-no-files-found: error
+          retention-days: 14
