@@ -1,0 +1,10 @@
+UnrealStreams — Stream Beyond Limits.
+
+* Stream and Download Ad-Free.
+* Multiple streaming sources via providers.
+* Multi Audio and Subtitles (Hindi, English, and more).
+* WatchList to save your favourites.
+* Continue Watching — pick up right where you left off.
+* External player and downloader support.
+* Fully customisable theme and accent colour.
+* Picture-in-Picture support.
